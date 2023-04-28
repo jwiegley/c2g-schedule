@@ -108,135 +108,118 @@ isValid maxGroupSize g p s =
     )
     $
     -- Every participant is assigned to an applicable group
-    sAnd
-      ( zipWith
-          ( \pi x ->
-              sAnd
-                ( zipWith
-                    ( \gi grp ->
-                        let Participant {..} = p !! pi
-                         in fromIntegral gi ./= x
-                              .|| ( fromBool
-                                      ( gDayOfWeek grp
-                                          `elem` map
-                                            availDayOfWeek
-                                            pAvailability
-                                          && any
-                                            ( (gStartHour grp >=)
-                                                . availStartHour
-                                            )
-                                            pAvailability
-                                          && any
-                                            ( (gStartHour grp <=)
-                                                . availEndHour
-                                            )
-                                            pAvailability
-                                      )
-                                      .&& maybe
-                                        minBound
-                                        fromIntegral
-                                        pPrefereredMinGroupSize
-                                        .<= solParticipants s !! gi
-                                      .&& maybe
-                                        maxBound
-                                        fromIntegral
-                                        pPrefereredMaxGroupSize
-                                        .>= solParticipants s !! gi
-                                      .&& x .== maybe x fromIntegral pFixed
-                                  )
-                    )
-                    [0 ..]
-                    g
-                )
-                .&& x .>= 0
-                .&& x .< genericLength g
-          )
-          [0 ..]
-          (solAssignments s)
+    ala
+      sAnd
+      solAssignments
+      ( \pi x ->
+          ala
+            sAnd
+            (const g)
+            ( \gi grp ->
+                let Participant {..} = p !! pi
+                 in fromIntegral gi ./= x
+                      .|| ( fromBool
+                              ( gDayOfWeek grp
+                                  `elem` map
+                                    availDayOfWeek
+                                    pAvailability
+                                  && any
+                                    ( (gStartHour grp >=)
+                                        . availStartHour
+                                    )
+                                    pAvailability
+                                  && any
+                                    ( (gStartHour grp <=)
+                                        . availEndHour
+                                    )
+                                    pAvailability
+                              )
+                              .&& maybe
+                                minBound
+                                fromIntegral
+                                pPrefereredMinGroupSize
+                                .<= solParticipants s !! gi
+                              .&& maybe
+                                maxBound
+                                fromIntegral
+                                pPrefereredMaxGroupSize
+                                .>= solParticipants s !! gi
+                              .&& x .== maybe x fromIntegral pFixed
+                          )
+            )
+            .&& x .>= 0
+            .&& x .< genericLength g
       )
       -- Every group has at least one black facilitator
-      .&& sAnd
-        ( zipWith
-            ( \gi x ->
-                x
-                  .== sum
-                    ( zipWith
-                        ( \pi a ->
-                            oneIf
-                              ( gi .== a
-                                  .&& fromBool (pIsFacilitator (p !! pi))
-                                  .&& fromBool (pIsBlack (p !! pi))
-                              )
-                        )
-                        [0 ..]
-                        (solAssignments s)
-                    )
-                  .&& x .>= 1
-            )
-            [0 ..]
-            (solBlackFacilitators s)
+      .&& ala
+        sAnd
+        solBlackFacilitators
+        ( \gi x ->
+            x
+              .== ala
+                sum
+                solAssignments
+                ( \pi a ->
+                    oneIf
+                      ( gi .== a
+                          .&& fromBool (pIsFacilitator (p !! pi))
+                          .&& fromBool (pIsBlack (p !! pi))
+                      )
+                )
+              .&& x .>= 1
         )
       -- Every group has at least two facilitators
-      .&& sAnd
-        ( zipWith
-            ( \gi x ->
-                x
-                  .== sum
-                    ( zipWith
-                        ( \pi a ->
-                            oneIf
-                              ( gi .== a
-                                  .&& fromBool (pIsFacilitator (p !! pi))
-                              )
-                        )
-                        [0 ..]
-                        (solAssignments s)
-                    )
-                  .&& x .>= 2
-            )
-            [0 ..]
-            (solFacilitators s)
+      .&& ala
+        sAnd
+        solFacilitators
+        ( \gi x ->
+            x
+              .== ala
+                sum
+                solAssignments
+                ( \pi a ->
+                    oneIf
+                      ( gi .== a
+                          .&& fromBool (pIsFacilitator (p !! pi))
+                      )
+                )
+              .&& x .>= 2
         )
       -- Track how many black participants are in each group
-      .&& sAnd
-        ( zipWith
-            ( \gi x ->
-                x
-                  .== sum
-                    ( zipWith
-                        ( \pi a ->
-                            oneIf
-                              ( gi .== a
-                                  .&& fromBool (pIsBlack (p !! pi))
-                              )
-                        )
-                        [0 ..]
-                        (solAssignments s)
-                    )
-            )
-            [0 ..]
-            (solBlackParticipants s)
+      .&& ala
+        sAnd
+        solBlackParticipants
+        ( \gi x ->
+            x
+              .== ala
+                sum
+                solAssignments
+                ( \pi a ->
+                    oneIf
+                      ( gi .== a
+                          .&& fromBool (pIsBlack (p !! pi))
+                      )
+                )
         )
       -- Every group does not exceed its maximum group size
-      .&& sAnd
-        ( zipWith
-            ( \gi x ->
-                x
-                  .== sum
-                    ( map
-                        (\a -> oneIf (fromIntegral gi .== a))
-                        (solAssignments s)
-                    )
-                  .&& x
-                    .<= fromIntegral
-                      ( fromMaybe
-                          maxGroupSize
-                          (gMaxSize (g !! gi))
-                      )
-            )
-            [0 ..]
-            (solParticipants s)
+      .&& ala
+        sAnd
+        solParticipants
+        ( \gi x ->
+            x
+              .== ala
+                sum
+                solAssignments
+                (\(_ :: Int) a -> oneIf (fromIntegral gi .== a))
+              .&& x
+                .<= fromIntegral
+                  ( fromMaybe
+                      maxGroupSize
+                      (gMaxSize (g !! gi))
+                  )
         )
+  where
+    ala k acc f = k (zipWith f [0 ..] (acc s))
 
 scheduleGroups :: Size -> [Group] -> [Participant] -> IO ()
 scheduleGroups maxGroupSize g p = do
