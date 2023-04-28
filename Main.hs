@@ -58,7 +58,7 @@ data Participant = Participant
     pNote :: [String],
     pPrefereredMinGroupSize :: Maybe Size,
     pPrefereredMaxGroupSize :: Maybe Size,
-    pFixed :: Bool
+    pFixed :: Maybe Int
   }
   deriving (Show)
 
@@ -104,20 +104,22 @@ isValid maxGroupSize g p s =
         && length (solParticipants s) == length g
     )
     $
-    -- Every participant assignment is to an applicable group
+    -- Every participant is assigned to an applicable group
     sAnd
       ( zipWith
           ( \pi x ->
               sAnd
                 ( zipWith
                     ( \gi grp ->
-                        gi ./= x
-                          .|| fromBool
-                            ( gDayOfWeek grp
-                                `elem` map
-                                  availDayOfWeek
-                                  (pAvailability (p !! pi))
-                            )
+                        ( gi ./= x
+                            .|| fromBool
+                              ( gDayOfWeek grp
+                                  `elem` map
+                                    availDayOfWeek
+                                    (pAvailability (p !! pi))
+                              )
+                        )
+                          .&& x .== maybe x fromIntegral (pFixed (p !! pi))
                     )
                     [0 ..]
                     g
@@ -260,7 +262,7 @@ main = do
           pNote = [],
           pPrefereredMinGroupSize = Nothing,
           pPrefereredMaxGroupSize = Nothing,
-          pFixed = False
+          pFixed = Nothing
         },
       Participant
         { pName = "Regina",
@@ -274,7 +276,7 @@ main = do
           pNote = [],
           pPrefereredMinGroupSize = Nothing,
           pPrefereredMaxGroupSize = Nothing,
-          pFixed = False
+          pFixed = Nothing
         },
       Participant
         { pName = "John",
@@ -288,7 +290,7 @@ main = do
           pNote = [],
           pPrefereredMinGroupSize = Nothing,
           pPrefereredMaxGroupSize = Nothing,
-          pFixed = False
+          pFixed = Nothing
         },
       Participant
         { pName = "Cherlynn",
@@ -302,7 +304,7 @@ main = do
           pNote = [],
           pPrefereredMinGroupSize = Nothing,
           pPrefereredMaxGroupSize = Nothing,
-          pFixed = False
+          pFixed = Nothing
         },
       Participant
         { pName = "Susan",
@@ -319,6 +321,6 @@ main = do
           pNote = [],
           pPrefereredMinGroupSize = Nothing,
           pPrefereredMaxGroupSize = Nothing,
-          pFixed = False
+          pFixed = Nothing
         }
     ]
