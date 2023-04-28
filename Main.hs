@@ -24,3 +24,6 @@ scheduleGroups _ _ = undefined
 -- version of that CSV file which assigns participants to groups.
 c2gSchedule :: FilePath -> IO ()
 c2gSchedule _ = undefined
+
+main :: IO ()
+main = undefined
