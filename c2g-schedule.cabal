@@ -1,0 +1,26 @@
+Name:          c2g-schedule
+Version:       1.0.0
+Synopsis:      A scheduler for Copper to Gold
+Description:   A scheduler for Copper to Gold
+Homepage:      http://github.com/jwiegley/c2g-schedule
+License:       AllRightsReserved
+License-file:  LICENSE
+Author:        John Wiegley
+Maintainer:    jwiegley@gmail.com
+Copyright:     (C) 2023 John Wiegley
+Category:      Web
+Build-type:    Simple
+Cabal-version: >= 1.8
+
+Executable c2g-schedule
+  Main-is:     Main.hs
+  Ghc-options: -Wall
+
+  Build-depends:
+      base         >= 4.6
+    , sbv
+    , cassava
+    , containers
+    , pretty-show
+    , regex-posix
+    , time
