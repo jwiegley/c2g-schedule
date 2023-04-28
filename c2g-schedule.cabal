@@ -22,5 +22,6 @@ Executable c2g-schedule
     , cassava
     , containers
     , pretty-show
+    , reflection
     , regex-posix
     , time
