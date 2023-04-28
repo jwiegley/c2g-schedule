@@ -14,6 +14,7 @@ module Main where
 -- import Data.Csv
 
 import Control.Exception (assert)
+import Data.Foldable
 import Data.List (genericLength)
 import Data.Maybe (fromMaybe)
 import Data.Proxy
@@ -29,7 +30,7 @@ mkSymbolicEnumeration ''DayOfWeek
 
 type Hour = Word8
 
-type Size = Word16
+type Size = Word8
 
 data Group = Group
   { gName :: String,
@@ -67,6 +68,7 @@ data Solution s v = Solution
   { solAssignments :: [v], -- participants -> group number
     solBlackFacilitators :: [v], -- groups -> black facilitator count
     solFacilitators :: [v], -- groups -> total facilitator count
+    solBlackParticipants :: [v], -- groups -> black participant count
     solParticipants :: [v] -- groups -> participant count
   }
   deriving (Show)
@@ -86,7 +88,8 @@ instance
           (take plen a)
           (take glen (drop plen a))
           (take glen (drop (glen + plen) a))
-          (take glen (drop (glen + glen + plen) a)),
+          (take glen (drop (glen + glen + plen) a))
+          (take glen (drop (glen + glen + glen + plen) a)),
         bs
       )
 
@@ -111,15 +114,36 @@ isValid maxGroupSize g p s =
               sAnd
                 ( zipWith
                     ( \gi grp ->
-                        ( gi ./= x
-                            .|| fromBool
-                              ( gDayOfWeek grp
-                                  `elem` map
-                                    availDayOfWeek
-                                    (pAvailability (p !! pi))
-                              )
-                        )
-                          .&& x .== maybe x fromIntegral (pFixed (p !! pi))
+                        let Participant {..} = p !! pi
+                         in fromIntegral gi ./= x
+                              .|| ( fromBool
+                                      ( gDayOfWeek grp
+                                          `elem` map
+                                            availDayOfWeek
+                                            pAvailability
+                                          && any
+                                            ( (gStartHour grp >=)
+                                                . availStartHour
+                                            )
+                                            pAvailability
+                                          && any
+                                            ( (gStartHour grp <=)
+                                                . availEndHour
+                                            )
+                                            pAvailability
+                                      )
+                                      .&& maybe
+                                        minBound
+                                        fromIntegral
+                                        pPrefereredMinGroupSize
+                                        .<= solParticipants s !! gi
+                                      .&& maybe
+                                        maxBound
+                                        fromIntegral
+                                        pPrefereredMaxGroupSize
+                                        .>= solParticipants s !! gi
+                                      .&& x .== maybe x fromIntegral pFixed
+                                  )
                     )
                     [0 ..]
                     g
@@ -173,6 +197,26 @@ isValid maxGroupSize g p s =
             [0 ..]
             (solFacilitators s)
         )
+      -- Track how many black participants are in each group
+      .&& sAnd
+        ( zipWith
+            ( \gi x ->
+                x
+                  .== sum
+                    ( zipWith
+                        ( \pi a ->
+                            oneIf
+                              ( gi .== a
+                                  .&& fromBool (pIsBlack (p !! pi))
+                              )
+                        )
+                        [0 ..]
+                        (solAssignments s)
+                    )
+            )
+            [0 ..]
+            (solBlackParticipants s)
+        )
       -- Every group does not exceed its maximum group size
       .&& sAnd
         ( zipWith
@@ -198,14 +242,21 @@ scheduleGroups :: Size -> [Group] -> [Participant] -> IO ()
 scheduleGroups maxGroupSize g p = do
   putStrLn "Finding all scheduling solutions.."
   reify (length g, length p) $ \(Proxy :: Proxy s) -> do
-    res <- sat $ do
+    LexicographicResult res <- optimize Lexicographic $ do
       solAssignments <- mkFreeVars (length p)
       solBlackFacilitators <- mkFreeVars (length g)
       solFacilitators <- mkFreeVars (length g)
+      solBlackParticipants <- mkFreeVars (length g)
       solParticipants <- mkFreeVars (length g)
-      let sol :: Solution s SWord8 = Solution {..}
-      constrain $ isValid maxGroupSize g p sol
-    -- putStrLn $ "satisfiability = " ++ show res
+      constrain $ isValid maxGroupSize g p Solution {..}
+      minimize "largest-number-of-facilitators" $
+        foldl' smax 0 solFacilitators
+      minimize "largest-number-of-participants" $
+        foldl' smax 0 solParticipants
+      maximize "largest-number-of-black-facilitators" $
+        foldl' smax 0 solBlackFacilitators
+      maximize "largest-number-of-black-participants" $
+        foldl' smax 0 solBlackParticipants
     case extractModel res :: Maybe (Solution s Word8) of
       Nothing -> error "No model found"
       Just model -> dispSolution model
@@ -214,15 +265,15 @@ scheduleGroups maxGroupSize g p = do
     dispSolution model = do
       pPrint model
       putStrLn $
-        " (Valid: "
+        "Valid: "
           ++ show (isValid maxGroupSize g p (literalize model))
-          ++ ")"
       where
         literalize s =
           s
             { solAssignments = map literal (solAssignments s),
               solBlackFacilitators = map literal (solBlackFacilitators s),
               solFacilitators = map literal (solFacilitators s),
+              solBlackParticipants = map literal (solBlackParticipants s),
               solParticipants = map literal (solParticipants s)
             }
 
