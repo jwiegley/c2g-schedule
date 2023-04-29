@@ -1,11 +1,9 @@
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -15,29 +13,23 @@ module Main where
 
 import Control.Exception (assert)
 import Data.Foldable
-import Data.List (genericLength)
-import Data.Maybe (fromMaybe)
+import Data.List (genericLength, intercalate, nub, tails)
+import Data.Map (Map)
+import Data.Map qualified as Map
 import Data.Proxy
 import Data.Reflection
 import Data.SBV
-import Text.Show.Pretty hiding (reify)
+import Data.Time
 import Prelude hiding (pi)
 
-data DayOfWeek = Sun | Mon | Tue | Wed | Thu | Fri | Sat
-  deriving (Enum)
-
-mkSymbolicEnumeration ''DayOfWeek
-
-type Hour = Word8
+type Time = Word16
 
 type Size = Word8
 
 data Group = Group
   { gName :: String,
     gDayOfWeek :: DayOfWeek,
-    gStartHour :: Hour,
-    gMaxSize :: Maybe Size,
-    gNote :: [String]
+    gStartTime :: Time
   }
   deriving (Show)
 
@@ -45,23 +37,22 @@ type Rank = Word8
 
 data Available = Available
   { availDayOfWeek :: DayOfWeek,
-    availStartHour :: Hour,
-    availEndHour :: Hour,
-    availRank :: Rank
+    availStartTime :: Time,
+    availEndTime :: Time
   }
-  deriving (Show)
+  deriving (Show, Eq)
 
 data Participant = Participant
   { pName :: String,
     pIsFacilitator :: Bool,
     pIsBlack :: Bool,
     pAvailability :: [Available],
-    pNote :: [String],
+    pPairWith :: [String],
     pPrefereredMinGroupSize :: Maybe Size,
     pPrefereredMaxGroupSize :: Maybe Size,
     pFixed :: Maybe Int
   }
-  deriving (Show)
+  deriving (Show, Eq)
 
 -- | A solution is a sequence of group assignments for each participant
 data Solution s v = Solution
@@ -93,6 +84,72 @@ instance
         bs
       )
 
+-- Create a group for every time slot where there's an available facilitator.
+-- The schedule will not assign anyone to groups that fail to meet the
+-- necessary criteria.
+determineGroups :: [Participant] -> [Group]
+determineGroups = map g . Map.keys . foldMap f
+  where
+    f :: Participant -> Map (DayOfWeek, Time) ()
+    f p = availability (pIsFacilitator p) (pAvailability p)
+      where
+        availability :: Bool -> [Available] -> Map (DayOfWeek, Time) ()
+        availability isFacilitator = foldMap $ \a ->
+          Map.fromList
+            [ ((availDayOfWeek a, hour), ())
+              | hour <-
+                  [ actualStart isFacilitator a,
+                    actualStart isFacilitator a + 50
+                    .. actualEnd isFacilitator a - 200
+                  ]
+            ]
+    g :: (DayOfWeek, Time) -> Group
+    g (dow, time) =
+      Group
+        { gName = show dow ++ " " ++ show time,
+          gDayOfWeek = dow,
+          gStartTime = time
+        }
+
+actualStart :: Bool -> Available -> Time
+actualStart isFacilitator a =
+  availStartTime a
+    + if isFacilitator
+      then 100
+      else 0
+
+actualEnd :: Bool -> Available -> Time
+actualEnd isFacilitator a =
+  availEndTime a
+    - if isFacilitator
+      then 100
+      else 0
+
+canMeet :: Bool -> Time -> Available -> Bool
+canMeet isFacilitator t a =
+  t >= actualStart isFacilitator a
+    && t < actualEnd isFacilitator a - 200
+
+-- Given a list of participants, determine the list of "pair ups" -- either
+-- participants with each other, or with a stated group.
+pairings :: [Participant] -> [(Int, Int)]
+pairings =
+  nub
+    . g
+    . foldr f Map.empty
+    . zipWith
+      (\pi i -> Map.fromList (map (,[pi]) (pName i : pPairWith i)))
+      [0 ..]
+  where
+    f :: Map String [Int] -> Map String [Int] -> Map String [Int]
+    f = Map.unionWithKey (const (++))
+
+    g :: Map String [Int] -> [(Int, Int)]
+    g = foldr (\x -> (pairs x ++)) [] . Map.elems
+      where
+        pairs :: [a] -> [(a, a)]
+        pairs l = [(x, y) | (x : ys) <- tails l, y <- ys]
+
 isValid ::
   Size ->
   [Group] ->
@@ -107,123 +164,123 @@ isValid maxGroupSize g p s =
         && length (solParticipants s) == length g
     )
     $
-    -- Every participant is assigned to an applicable group
+    -- Every participant is assigned to an applicable group, and the
+    -- constraints hold for being associated with that group
     ala
       sAnd
       solAssignments
       ( \pi x ->
-          ala
-            sAnd
-            (const g)
-            ( \gi grp ->
-                let Participant {..} = p !! pi
-                 in fromIntegral gi ./= x
-                      .|| ( fromBool
-                              ( gDayOfWeek grp
-                                  `elem` map
-                                    availDayOfWeek
-                                    pAvailability
-                                  && any
-                                    ( (gStartHour grp >=)
-                                        . availStartHour
-                                    )
-                                    pAvailability
-                                  && any
-                                    ( (gStartHour grp <=)
-                                        . availEndHour
-                                    )
-                                    pAvailability
-                              )
-                              .&& maybe
-                                minBound
-                                fromIntegral
-                                pPrefereredMinGroupSize
-                                .<= solParticipants s !! gi
-                              .&& maybe
-                                maxBound
-                                fromIntegral
-                                pPrefereredMaxGroupSize
-                                .>= solParticipants s !! gi
-                              .&& x .== maybe x fromIntegral pFixed
-                          )
-            )
-            .&& x .>= 0
+          x .>= 0
             .&& x .< genericLength g
+            .&& sAll
+              ( \gi ->
+                  fromIntegral gi .== x
+                    .=> eachParticipant (p !! pi) x (g !! gi) gi
+              )
+              [0 .. length g - 1]
       )
-      -- Every group has at least one black facilitator
-      .&& ala
-        sAnd
-        solBlackFacilitators
-        ( \gi x ->
-            x
-              .== ala
-                sum
-                solAssignments
-                ( \pi a ->
-                    oneIf
-                      ( gi .== a
-                          .&& fromBool (pIsFacilitator (p !! pi))
-                          .&& fromBool (pIsBlack (p !! pi))
-                      )
-                )
-              .&& x .>= 1
-        )
-      -- Every group has at least two facilitators
-      .&& ala
-        sAnd
-        solFacilitators
-        ( \gi x ->
-            x
-              .== ala
-                sum
-                solAssignments
-                ( \pi a ->
-                    oneIf
-                      ( gi .== a
-                          .&& fromBool (pIsFacilitator (p !! pi))
-                      )
-                )
-              .&& x .>= 2
-        )
+      -- Track how many facilitators are in each group
+      .&& ala sAnd solFacilitators (\gi x -> x .== facilitators gi)
+      -- Track how many black facilitators are in each group
+      .&& ala sAnd solBlackFacilitators (\gi x -> x .== blackFacilitators gi)
+      -- Track how many participants are in each group
+      .&& ala sAnd solParticipants (\gi x -> x .== participants gi)
       -- Track how many black participants are in each group
-      .&& ala
-        sAnd
-        solBlackParticipants
-        ( \gi x ->
-            x
-              .== ala
-                sum
-                solAssignments
-                ( \pi a ->
-                    oneIf
-                      ( gi .== a
-                          .&& fromBool (pIsBlack (p !! pi))
-                      )
-                )
-        )
-      -- Every group does not exceed its maximum group size
-      .&& ala
-        sAnd
-        solParticipants
-        ( \gi x ->
-            x
-              .== ala
-                sum
-                solAssignments
-                (\(_ :: Int) a -> oneIf (fromIntegral gi .== a))
-              .&& x
-                .<= fromIntegral
-                  ( fromMaybe
-                      maxGroupSize
-                      (gMaxSize (g !! gi))
+      .&& ala sAnd solBlackParticipants (\gi x -> x .== blackParticipants gi)
+      -- Ensure correct group sizes
+      .&& sAll
+        ( \gi ->
+            (participants gi .== 0 .&& facilitators gi .== 0)
+              .|| ( participants gi .> 0
+                      .&& participants gi .<= fromIntegral maxGroupSize
+                      .&& facilitators gi .>= 2
+                      .&& blackFacilitators gi .>= 1
                   )
         )
+        [0 .. length g - 1]
+      -- All pairings are honored
+      .&& sAll
+        ( \(i, j) ->
+            solAssignments s !! i .== solAssignments s !! j
+        )
+        (pairings p)
   where
+    eachParticipant Participant {..} x Group {..} gi =
+      fromBool
+        ( gDayOfWeek
+            `elem` map
+              availDayOfWeek
+              pAvailability
+            && any
+              (canMeet pIsFacilitator gStartTime)
+              pAvailability
+        )
+        .&& maybe
+          minBound
+          fromIntegral
+          pPrefereredMinGroupSize
+          .<= solParticipants s !! gi
+        .&& maybe
+          maxBound
+          fromIntegral
+          pPrefereredMaxGroupSize
+          .>= solParticipants s !! gi
+        .&& x .== maybe x fromIntegral pFixed
+
     ala k acc f = k (zipWith f [0 ..] (acc s))
 
-scheduleGroups :: Size -> [Group] -> [Participant] -> IO ()
-scheduleGroups maxGroupSize g p = do
-  putStrLn "Finding all scheduling solutions.."
+    participants = countParticipants (const True)
+    blackParticipants = countParticipants pIsBlack
+    facilitators = countParticipants pIsFacilitator
+    blackFacilitators =
+      countParticipants (\i -> pIsFacilitator i && pIsBlack i)
+
+    countParticipants :: (Participant -> Bool) -> Int -> SWord8
+    countParticipants f gi =
+      ala
+        sum
+        solAssignments
+        ( \pi a ->
+            oneIf
+              ( fromIntegral gi .== a
+                  .&& fromBool (f (p !! pi))
+              )
+        )
+
+showSchedule :: [Participant] -> [Group] -> Solution s Word8 -> String
+showSchedule p g s =
+  unlines $ intercalate [""] $ map f assigned
+  where
+    assigned = nub (solAssignments s)
+
+    f :: Word8 -> [String]
+    f gi =
+      [ gName (g !! fromIntegral gi),
+        "===================="
+      ]
+        ++ concat
+          ( zipWith
+              (\pi i -> [getName (p !! pi) | i == gi])
+              [0 ..]
+              (solAssignments s)
+          )
+
+    getName i =
+      ( if pIsBlack i
+          then "*"
+          else " "
+      )
+        ++ ( if pIsFacilitator i
+               then "F"
+               else " "
+           )
+        ++ " "
+        ++ pName i
+
+scheduleGroups :: Size -> [Participant] -> IO ()
+scheduleGroups maxGroupSize p = do
+  let g = determineGroups p
+  putStrLn "Finding scheduling solution...\n"
   reify (length g, length p) $ \(Proxy :: Proxy s) -> do
     LexicographicResult res <- optimize Lexicographic $ do
       solAssignments <- mkFreeVars (length p)
@@ -242,13 +299,13 @@ scheduleGroups maxGroupSize g p = do
         foldl' smax 0 solBlackParticipants
     case extractModel res :: Maybe (Solution s Word8) of
       Nothing -> error "No model found"
-      Just model -> dispSolution model
+      Just model -> dispSolution g model
   where
-    dispSolution :: Solution s Word8 -> IO ()
-    dispSolution model = do
-      pPrint model
+    dispSolution :: [Group] -> Solution s Word8 -> IO ()
+    dispSolution g model = do
+      putStr $ showSchedule p g model
       putStrLn $
-        "Valid: "
+        "\nValid: "
           ++ show (isValid maxGroupSize g p (literalize model))
       where
         literalize s =
@@ -267,94 +324,82 @@ c2gSchedule _ = undefined
 
 main :: IO ()
 main = do
-  scheduleGroups
-    20
-    [ Group
-        { gName = "Mon7p",
-          gDayOfWeek = Mon,
-          gStartHour = 19,
-          gMaxSize = Nothing,
-          gNote = []
-        },
-      Group
-        { gName = "Thu4p",
-          gDayOfWeek = Thu,
-          gStartHour = 16,
-          gMaxSize = Nothing,
-          gNote = []
-        }
-    ]
-    [ Participant
-        { pName = "Aaron",
-          pIsFacilitator = True,
-          pIsBlack = False,
-          pAvailability =
-            [ Available Thu 12 20 0,
-              Available Fri 12 20 0,
-              Available Sat 12 20 0
-            ],
-          pNote = [],
-          pPrefereredMinGroupSize = Nothing,
-          pPrefereredMaxGroupSize = Nothing,
-          pFixed = Nothing
-        },
-      Participant
-        { pName = "Regina",
-          pIsFacilitator = True,
-          pIsBlack = True,
-          pAvailability =
-            [ Available Thu 12 20 0,
-              Available Fri 12 20 0,
-              Available Sat 12 20 0
-            ],
-          pNote = [],
-          pPrefereredMinGroupSize = Nothing,
-          pPrefereredMaxGroupSize = Nothing,
-          pFixed = Nothing
-        },
-      Participant
-        { pName = "John",
-          pIsFacilitator = True,
-          pIsBlack = False,
-          pAvailability =
-            [ Available Mon 12 20 0,
-              Available Tue 12 20 0,
-              Available Wed 12 20 0
-            ],
-          pNote = [],
-          pPrefereredMinGroupSize = Nothing,
-          pPrefereredMaxGroupSize = Nothing,
-          pFixed = Nothing
-        },
-      Participant
-        { pName = "Cherlynn",
-          pIsFacilitator = True,
-          pIsBlack = True,
-          pAvailability =
-            [ Available Mon 12 20 0,
-              Available Tue 12 20 0,
-              Available Wed 12 20 0
-            ],
-          pNote = [],
-          pPrefereredMinGroupSize = Nothing,
-          pPrefereredMaxGroupSize = Nothing,
-          pFixed = Nothing
-        },
-      Participant
-        { pName = "Susan",
-          pIsFacilitator = True,
-          pIsBlack = False,
-          pAvailability =
-            [ Available Mon 12 20 0,
-              Available Tue 12 20 0,
-              Available Wed 12 20 0,
-              Available Thu 12 20 0,
-              Available Fri 12 20 0,
-              Available Sat 12 20 0
-            ],
-          pNote = [],
-          pPrefereredMinGroupSize = Nothing,
-          pPrefereredMaxGroupSize = Nothing,
-          pFixed = Nothing
-        }
-    ]
+  print $ pairings participants
+  scheduleGroups 20 participants
+  where
+    participants =
+      [ Participant
+          { pName = "Aaron",
+            pIsFacilitator = True,
+            pIsBlack = False,
+            pAvailability =
+              [ Available Thursday 1200 2000,
+                Available Friday 1200 2000,
+                Available Saturday 1200 2000
+              ],
+            pPairWith = ["Susan"],
+            pPrefereredMinGroupSize = Nothing,
+            pPrefereredMaxGroupSize = Nothing,
+            pFixed = Nothing
+          },
+        Participant
+          { pName = "Regina",
+            pIsFacilitator = True,
+            pIsBlack = True,
+            pAvailability =
+              [ Available Thursday 1200 2000,
+                Available Friday 1200 2000,
+                Available Saturday 1200 2000
+              ],
+            pPairWith = [],
+            pPrefereredMinGroupSize = Nothing,
+            pPrefereredMaxGroupSize = Nothing,
+            pFixed = Nothing
+          },
+        Participant
+          { pName = "John",
+            pIsFacilitator = True,
+            pIsBlack = False,
+            pAvailability =
+              [ Available Monday 1200 2000,
+                Available Tuesday 1200 2000,
+                Available Wednesday 1200 2000,
+                Available Thursday 1200 2000
+              ],
+            pPairWith = [],
+            pPrefereredMinGroupSize = Nothing,
+            pPrefereredMaxGroupSize = Nothing,
+            pFixed = Nothing
+          },
+        Participant
+          { pName = "Cherlynn",
+            pIsFacilitator = True,
+            pIsBlack = True,
+            pAvailability =
+              [ Available Monday 1200 2000,
+                Available Tuesday 1200 2000,
+                Available Wednesday 1200 2000
+              ],
+            pPairWith = [],
+            pPrefereredMinGroupSize = Nothing,
+            pPrefereredMaxGroupSize = Nothing,
+            pFixed = Nothing
+          },
+        Participant
+          { pName = "Susan",
+            pIsFacilitator = True,
+            pIsBlack = False,
+            pAvailability =
+              [ Available Monday 1200 2000,
+                Available Tuesday 1200 2000,
+                Available Wednesday 1200 2000,
+                Available Thursday 1200 2000,
+                Available Friday 1200 2000,
+                Available Saturday 1200 2000
+              ],
+            pPairWith = [],
+            pPrefereredMinGroupSize = Nothing,
+            pPrefereredMaxGroupSize = Nothing,
+            pFixed = Nothing
+          }
+      ]
