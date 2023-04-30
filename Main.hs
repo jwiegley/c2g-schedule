@@ -48,6 +48,7 @@ data Participant = Participant
     pIsBlack :: Bool,
     pAvailability :: [Available],
     pPairWith :: [String],
+    pDoNotPairWith :: [String],
     pPrefereredMinGroupSize :: Maybe Size,
     pPrefereredMaxGroupSize :: Maybe Size,
     pFixed :: Maybe Int
@@ -132,13 +133,13 @@ canMeet isFacilitator t a =
 
 -- Given a list of participants, determine the list of "pair ups" -- either
 -- participants with each other, or with a stated group.
-pairings :: [Participant] -> [(Int, Int)]
-pairings =
+pairings :: (Participant -> [String]) -> [Participant] -> [(Int, Int)]
+pairings accessor =
   nub
     . g
     . foldr f Map.empty
     . zipWith
-      (\pi i -> Map.fromList (map (,[pi]) (pName i : pPairWith i)))
+      (\pi i -> Map.fromList (map (,[pi]) (pName i : accessor i)))
       [0 ..]
   where
     f :: Map String [Int] -> Map String [Int] -> Map String [Int]
@@ -203,7 +204,12 @@ isValid maxGroupSize g p s =
         ( \(i, j) ->
             solAssignments s !! i .== solAssignments s !! j
         )
-        (pairings p)
+        (pairings pPairWith p)
+      .&& sAll
+        ( \(i, j) ->
+            solAssignments s !! i ./= solAssignments s !! j
+        )
+        (pairings pDoNotPairWith p)
   where
     eachParticipant Participant {..} x Group {..} gi =
       fromBool
@@ -289,14 +295,8 @@ scheduleGroups maxGroupSize p = do
       solBlackParticipants <- mkFreeVars (length g)
       solParticipants <- mkFreeVars (length g)
       constrain $ isValid maxGroupSize g p Solution {..}
-      minimize "largest-number-of-facilitators" $
-        foldl' smax 0 solFacilitators
-      minimize "largest-number-of-participants" $
-        foldl' smax 0 solParticipants
-      maximize "largest-number-of-black-facilitators" $
-        foldl' smax 0 solBlackFacilitators
-      maximize "largest-number-of-black-participants" $
-        foldl' smax 0 solBlackParticipants
+      minimize "number-facilitators" $ foldl' smax 0 solFacilitators
+      maximize "balance-participants" $ foldl' smin 0 solBlackParticipants
     case extractModel res :: Maybe (Solution s Word8) of
       Nothing -> error "No model found"
       Just model -> dispSolution g model
@@ -324,7 +324,8 @@ c2gSchedule _ = undefined
 
 main :: IO ()
 main = do
-  print $ pairings participants
+  -- print $ pairings pPairWith participants
+  -- print $ pairings pDoNotPairWith participants
   scheduleGroups 20 participants
   where
     participants =
@@ -338,6 +339,7 @@ main = do
                 Available Saturday 1200 2000
               ],
             pPairWith = ["Susan"],
+            pDoNotPairWith = [],
             pPrefereredMinGroupSize = Nothing,
             pPrefereredMaxGroupSize = Nothing,
             pFixed = Nothing
@@ -352,6 +354,7 @@ main = do
                 Available Saturday 1200 2000
               ],
             pPairWith = [],
+            pDoNotPairWith = [],
             pPrefereredMinGroupSize = Nothing,
             pPrefereredMaxGroupSize = Nothing,
             pFixed = Nothing
@@ -367,6 +370,7 @@ main = do
                 Available Thursday 1200 2000
               ],
             pPairWith = [],
+            pDoNotPairWith = [],
             pPrefereredMinGroupSize = Nothing,
             pPrefereredMaxGroupSize = Nothing,
             pFixed = Nothing
@@ -381,6 +385,7 @@ main = do
                 Available Wednesday 1200 2000
               ],
             pPairWith = [],
+            pDoNotPairWith = [],
             pPrefereredMinGroupSize = Nothing,
             pPrefereredMaxGroupSize = Nothing,
             pFixed = Nothing
@@ -398,6 +403,7 @@ main = do
                 Available Saturday 1200 2000
               ],
             pPairWith = [],
+            pDoNotPairWith = [],
             pPrefereredMinGroupSize = Nothing,
             pPrefereredMaxGroupSize = Nothing,
             pFixed = Nothing
