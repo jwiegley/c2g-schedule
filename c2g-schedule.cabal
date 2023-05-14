@@ -1,27 +1,37 @@
-Name:          c2g-schedule
-Version:       1.0.0
-Synopsis:      A scheduler for Copper to Gold
-Description:   A scheduler for Copper to Gold
-Homepage:      http://github.com/jwiegley/c2g-schedule
-License:       AllRightsReserved
-License-file:  LICENSE
-Author:        John Wiegley
-Maintainer:    jwiegley@gmail.com
-Copyright:     (C) 2023 John Wiegley
-Category:      Web
-Build-type:    Simple
-Cabal-version: >= 1.8
+cabal-version: 1.12
 
-Executable c2g-schedule
-  Main-is:     Main.hs
-  Ghc-options: -Wall
+-- This file has been generated from package.yaml by hpack version 0.35.2.
+--
+-- see: https://github.com/sol/hpack
 
-  Build-depends:
-      base         >= 4.6
-    , sbv
+name:           c2g-schedule
+version:        1.0.0
+synopsis:       A scheduler for Copper to Gold
+description:    A scheduler for Copper to Gold
+category:       System
+homepage:       https://github.com/jwiegley/c2g-schedule#readme
+bug-reports:    https://github.com/jwiegley/c2g-schedule/issues
+author:         John Wiegley
+maintainer:     john.wiegley@coppertogold.org
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/jwiegley/c2g-schedule
+
+executable c2g-schedule
+  main-is: Main.hs
+  other-modules:
+      Paths_c2g_schedule
+  build-depends:
+      base >=4.6
     , cassava
     , containers
     , pretty-show
     , reflection
     , regex-posix
+    , sbv
     , time
+  default-language: Haskell2010
