@@ -21,10 +21,10 @@
           c2g-schedule =
             final.haskell-nix.project' {
               src = ./.;
-              compiler-nix-name = "ghc961";
+              compiler-nix-name = "ghc962";
               shell.tools = {
                 cabal = {};
-                # haskell-language-server = {};
+                haskell-language-server = {};
                 # hlint = {};
               };
               shell.buildInputs = with pkgs; [
@@ -37,7 +37,9 @@
       packages.default = flake.packages."c2g-schedule:exe:c2g-schedule";
 
       devShell = pkgs.haskellPackages.shellFor {
-        packages = p: [
+        packages = with pkgs.haskellPackages; p: [
+          cabal-install
+          haskell-language-server
         ];
 
         buildInputs = with pkgs.haskellPackages; [

@@ -12,6 +12,7 @@ description:
 
 dependencies:
   - base         >= 4.6
+  - bytestring
   - sbv
   - cassava
   - containers

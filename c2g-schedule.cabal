@@ -27,6 +27,7 @@ executable c2g-schedule
       Paths_c2g_schedule
   build-depends:
       base >=4.6
+    , bytestring
     , cassava
     , containers
     , pretty-show

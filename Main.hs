@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -12,6 +13,7 @@ module Main where
 -- import Data.Csv
 
 import Control.Exception (assert)
+import Data.ByteString
 import Data.Foldable
 import Data.List (genericLength, intercalate, nub, tails)
 import Data.Map (Map)
@@ -20,6 +22,7 @@ import Data.Proxy
 import Data.Reflection
 import Data.SBV
 import Data.Time
+import GHC.Generics
 import Prelude hiding (pi)
 
 type Time = Word16
@@ -41,6 +44,17 @@ data Available = Available
     availEndTime :: Time
   }
   deriving (Show, Eq)
+
+data RawParticipant = RawParticipant
+  { firstName :: String,
+    lastName :: String,
+    worldExperience :: String,
+    slotOne :: String,
+    slotTwo :: String,
+    slotThree :: String,
+    affinity :: String
+  }
+  deriving (Show, Eq, Generic)
 
 data Participant = Participant
   { pName :: String,
@@ -211,6 +225,10 @@ isValid maxGroupSize g p s =
         )
         (pairings pDoNotPairWith p)
   where
+    -- TODO: Ensure total facilitator skill level is above a threshold
+    -- TODO: Ensure there are not too many facilitator assistants
+    -- TODO: Facilitators and assistants can be in multiple sessions
+
     eachParticipant Participant {..} x Group {..} gi =
       fromBool
         ( gDayOfWeek
@@ -321,6 +339,9 @@ scheduleGroups maxGroupSize p = do
 -- version of that CSV file which assigns participants to groups.
 c2gSchedule :: FilePath -> IO ()
 c2gSchedule _ = undefined
+
+readParticipants :: ByteString -> [Participant]
+readParticipants = undefined
 
 main :: IO ()
 main = do
