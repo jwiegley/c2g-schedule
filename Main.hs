@@ -12,8 +12,12 @@ module Main where
 
 -- import Data.Csv
 
+import Control.Arrow (second)
 import Control.Exception (assert)
-import Data.ByteString
+import Data.ByteString.Lazy (ByteString)
+import Data.ByteString.Lazy qualified as BL
+import Data.Char (isDigit, toLower)
+import Data.Csv (FromNamedRecord, decodeByName)
 import Data.Foldable
 import Data.List (genericLength, intercalate, nub, tails)
 import Data.Map (Map)
@@ -22,7 +26,10 @@ import Data.Proxy
 import Data.Reflection
 import Data.SBV
 import Data.Time
+import Data.Vector qualified as V
 import GHC.Generics
+import System.Environment (getArgs)
+import Text.Show.Pretty (pPrint)
 import Prelude hiding (pi)
 
 type Time = Word16
@@ -34,14 +41,13 @@ data Group = Group
     gDayOfWeek :: DayOfWeek,
     gStartTime :: Time
   }
-  deriving (Show)
+  deriving (Show, Ord, Eq)
 
 type Rank = Word8
 
 data Available = Available
   { availDayOfWeek :: DayOfWeek,
-    availStartTime :: Time,
-    availEndTime :: Time
+    availStartTime :: Time
   }
   deriving (Show, Eq)
 
@@ -52,9 +58,13 @@ data RawParticipant = RawParticipant
     slotOne :: String,
     slotTwo :: String,
     slotThree :: String,
-    affinity :: String
+    affinity :: String,
+    aversion :: String,
+    facilitator :: String
   }
   deriving (Show, Eq, Generic)
+
+instance FromNamedRecord RawParticipant
 
 data Participant = Participant
   { pName :: String,
@@ -102,48 +112,34 @@ instance
 -- Create a group for every time slot where there's an available facilitator.
 -- The schedule will not assign anyone to groups that fail to meet the
 -- necessary criteria.
-determineGroups :: [Participant] -> [Group]
-determineGroups = map g . Map.keys . foldMap f
+determineGroups :: [Participant] -> [(Group, [Participant])]
+determineGroups ps =
+  Map.assocs $
+    foldl'
+      (\acc p -> Map.unionWith (++) acc (f p))
+      Map.empty
+      ps
   where
-    f :: Participant -> Map (DayOfWeek, Time) ()
-    f p = availability (pIsFacilitator p) (pAvailability p)
+    f :: Participant -> Map Group [Participant]
+    f p =
+      availability (pIsFacilitator p) (pAvailability p)
       where
-        availability :: Bool -> [Available] -> Map (DayOfWeek, Time) ()
-        availability isFacilitator = foldMap $ \a ->
-          Map.fromList
-            [ ((availDayOfWeek a, hour), ())
-              | hour <-
-                  [ actualStart isFacilitator a,
-                    actualStart isFacilitator a + 50
-                    .. actualEnd isFacilitator a - 200
-                  ]
-            ]
-    g :: (DayOfWeek, Time) -> Group
-    g (dow, time) =
-      Group
-        { gName = show dow ++ " " ++ show time,
-          gDayOfWeek = dow,
-          gStartTime = time
-        }
-
-actualStart :: Bool -> Available -> Time
-actualStart isFacilitator a =
-  availStartTime a
-    + if isFacilitator
-      then 100
-      else 0
-
-actualEnd :: Bool -> Available -> Time
-actualEnd isFacilitator a =
-  availEndTime a
-    - if isFacilitator
-      then 100
-      else 0
-
-canMeet :: Bool -> Time -> Available -> Bool
-canMeet isFacilitator t a =
-  t >= actualStart isFacilitator a
-    && t < actualEnd isFacilitator a - 200
+        availability ::
+          Bool -> [Available] -> Map Group [Participant]
+        availability isFacilitator avails =
+          (\f -> foldl' f Map.empty avails) $ \acc a ->
+            let dow = availDayOfWeek a
+                time = availStartTime a
+             in Map.unionWith (++) acc $
+                  Map.fromList
+                    [ ( Group
+                          { gName = show dow ++ " " ++ show time,
+                            gDayOfWeek = dow,
+                            gStartTime = time
+                          },
+                        [p]
+                      )
+                    ]
 
 -- Given a list of participants, determine the list of "pair ups" -- either
 -- participants with each other, or with a stated group.
@@ -153,7 +149,13 @@ pairings accessor =
     . g
     . foldr f Map.empty
     . zipWith
-      (\pi i -> Map.fromList (map (,[pi]) (pName i : accessor i)))
+      ( \pi i ->
+          Map.fromList
+            ( map
+                (,[pi])
+                (map toLower (pName i) : accessor i)
+            )
+      )
       [0 ..]
   where
     f :: Map String [Int] -> Map String [Int] -> Map String [Int]
@@ -167,11 +169,12 @@ pairings accessor =
 
 isValid ::
   Size ->
+  Size ->
   [Group] ->
   [Participant] ->
   Solution s SWord8 ->
   SBool
-isValid maxGroupSize g p s =
+isValid minGroupSize maxGroupSize g p s =
   assert
     ( length (solAssignments s) == length p
         && length (solBlackFacilitators s) == length g
@@ -207,9 +210,10 @@ isValid maxGroupSize g p s =
         ( \gi ->
             (participants gi .== 0 .&& facilitators gi .== 0)
               .|| ( participants gi .> 0
+                      .&& participants gi .>= fromIntegral minGroupSize
                       .&& participants gi .<= fromIntegral maxGroupSize
-                      .&& facilitators gi .>= 2
-                      .&& blackFacilitators gi .>= 1
+                      .&& facilitators gi .> 0
+                      -- .&& blackFacilitators gi .> 0
                   )
         )
         [0 .. length g - 1]
@@ -232,12 +236,8 @@ isValid maxGroupSize g p s =
     eachParticipant Participant {..} x Group {..} gi =
       fromBool
         ( gDayOfWeek
-            `elem` map
-              availDayOfWeek
-              pAvailability
-            && any
-              (canMeet pIsFacilitator gStartTime)
-              pAvailability
+            `elem` map availDayOfWeek pAvailability
+            && any (\a -> gStartTime == availStartTime a) pAvailability
         )
         .&& maybe
           minBound
@@ -271,8 +271,8 @@ isValid maxGroupSize g p s =
               )
         )
 
-showSchedule :: [Participant] -> [Group] -> Solution s Word8 -> String
-showSchedule p g s =
+showSchedule :: [Group] -> [Participant] -> Solution s Word8 -> String
+showSchedule g p s =
   unlines $ intercalate [""] $ map f assigned
   where
     assigned = nub (solAssignments s)
@@ -301,10 +301,12 @@ showSchedule p g s =
         ++ " "
         ++ pName i
 
-scheduleGroups :: Size -> [Participant] -> IO ()
-scheduleGroups maxGroupSize p = do
+scheduleGroups :: Size -> Size -> [Participant] -> IO ()
+scheduleGroups minGroupSize maxGroupSize p = do
   let g = determineGroups p
   putStrLn "Finding scheduling solution...\n"
+  pPrint g
+  -- pPrint p
   reify (length g, length p) $ \(Proxy :: Proxy s) -> do
     LexicographicResult res <- optimize Lexicographic $ do
       solAssignments <- mkFreeVars (length p)
@@ -312,19 +314,19 @@ scheduleGroups maxGroupSize p = do
       solFacilitators <- mkFreeVars (length g)
       solBlackParticipants <- mkFreeVars (length g)
       solParticipants <- mkFreeVars (length g)
-      constrain $ isValid maxGroupSize g p Solution {..}
+      constrain $ isValid minGroupSize maxGroupSize (map fst g) p Solution {..}
       minimize "number-facilitators" $ foldl' smax 0 solFacilitators
       maximize "balance-participants" $ foldl' smin 0 solBlackParticipants
     case extractModel res :: Maybe (Solution s Word8) of
       Nothing -> error "No model found"
-      Just model -> dispSolution g model
+      Just model -> dispSolution (map fst g) p model
   where
-    dispSolution :: [Group] -> Solution s Word8 -> IO ()
-    dispSolution g model = do
-      putStr $ showSchedule p g model
+    dispSolution :: [Group] -> [Participant] -> Solution s Word8 -> IO ()
+    dispSolution g p' model = do
+      putStr $ showSchedule g p' model
       putStrLn $
         "\nValid: "
-          ++ show (isValid maxGroupSize g p (literalize model))
+          ++ show (isValid minGroupSize maxGroupSize g p' (literalize model))
       where
         literalize s =
           s
@@ -337,96 +339,71 @@ scheduleGroups maxGroupSize p = do
 
 -- Given a CSV file of the proper schedule, generate and display an updated
 -- version of that CSV file which assigns participants to groups.
-c2gSchedule :: FilePath -> IO ()
-c2gSchedule _ = undefined
+readParticipants :: FilePath -> IO [Participant]
+readParticipants path = do
+  csv <- BL.readFile path
+  let rawParticipants = readRawParticipants csv
+  -- putStrLn "=== raw ==="
+  -- pPrint rawParticipants
+  -- putStrLn "=== cooked ==="
+  return $ map cookParticipant rawParticipants
+  where
+    readRawParticipants :: ByteString -> [RawParticipant]
+    readRawParticipants bs = case decodeByName bs of
+      Left err -> error err
+      Right (_, vec) -> V.toList vec
 
-readParticipants :: ByteString -> [Participant]
-readParticipants = undefined
+cookParticipant :: RawParticipant -> Participant
+cookParticipant raw@RawParticipant {..} = Participant {..}
+  where
+    pName = firstName ++ " " ++ lastName
+    pIsFacilitator = facilitator == "yes"
+    pIsBlack = worldExperience /= ""
+    pAvailability = fromSlot slotOne ++ fromSlot slotTwo ++ fromSlot slotThree
+    pPairWith = []
+    -- pPairWith = [map toLower affinity | affinity /= ""]
+    pDoNotPairWith = []
+    -- pDoNotPairWith = [map toLower aversion | aversion /= ""]
+    pPrefereredMinGroupSize = Nothing
+    pPrefereredMaxGroupSize = Nothing
+    pFixed = Nothing
+    pPossibleGroups = []
+
+    fromSlot :: String -> [Available]
+    fromSlot "" = []
+    fromSlot s =
+      [ Available
+          { availDayOfWeek = dow (take 3 s),
+            availStartTime =
+              let rest = drop 4 s
+                  hour = takeWhile isDigit rest
+                  ampm = dropWhile isDigit rest
+               in if ampm == "a" && hour == "12"
+                    then 0
+                    else
+                      read hour * 100
+                        + ( if ampm /= "a" && hour == "12"
+                              then 0
+                              else 1200
+                          )
+          }
+      ]
+
+    dow :: String -> DayOfWeek
+    dow "Sun" = Sunday
+    dow "Mon" = Monday
+    dow "Tue" = Tuesday
+    dow "Wed" = Wednesday
+    dow "Thu" = Thursday
+    dow "Fri" = Friday
+    dow "Sat" = Saturday
+    dow _ = error $ "Could not parse slot for: " ++ show raw
 
 main :: IO ()
 main = do
-  -- print $ pairings pPairWith participants
-  -- print $ pairings pDoNotPairWith participants
-  scheduleGroups 20 participants
-  where
-    participants =
-      [ Participant
-          { pName = "Aaron",
-            pIsFacilitator = True,
-            pIsBlack = False,
-            pAvailability =
-              [ Available Thursday 1200 2000,
-                Available Friday 1200 2000,
-                Available Saturday 1200 2000
-              ],
-            pPairWith = ["Susan"],
-            pDoNotPairWith = [],
-            pPrefereredMinGroupSize = Nothing,
-            pPrefereredMaxGroupSize = Nothing,
-            pFixed = Nothing
-          },
-        Participant
-          { pName = "Regina",
-            pIsFacilitator = True,
-            pIsBlack = True,
-            pAvailability =
-              [ Available Thursday 1200 2000,
-                Available Friday 1200 2000,
-                Available Saturday 1200 2000
-              ],
-            pPairWith = [],
-            pDoNotPairWith = [],
-            pPrefereredMinGroupSize = Nothing,
-            pPrefereredMaxGroupSize = Nothing,
-            pFixed = Nothing
-          },
-        Participant
-          { pName = "John",
-            pIsFacilitator = True,
-            pIsBlack = False,
-            pAvailability =
-              [ Available Monday 1200 2000,
-                Available Tuesday 1200 2000,
-                Available Wednesday 1200 2000,
-                Available Thursday 1200 2000
-              ],
-            pPairWith = [],
-            pDoNotPairWith = [],
-            pPrefereredMinGroupSize = Nothing,
-            pPrefereredMaxGroupSize = Nothing,
-            pFixed = Nothing
-          },
-        Participant
-          { pName = "Cherlynn",
-            pIsFacilitator = True,
-            pIsBlack = True,
-            pAvailability =
-              [ Available Monday 1200 2000,
-                Available Tuesday 1200 2000,
-                Available Wednesday 1200 2000
-              ],
-            pPairWith = [],
-            pDoNotPairWith = [],
-            pPrefereredMinGroupSize = Nothing,
-            pPrefereredMaxGroupSize = Nothing,
-            pFixed = Nothing
-          },
-        Participant
-          { pName = "Susan",
-            pIsFacilitator = True,
-            pIsBlack = False,
-            pAvailability =
-              [ Available Monday 1200 2000,
-                Available Tuesday 1200 2000,
-                Available Wednesday 1200 2000,
-                Available Thursday 1200 2000,
-                Available Friday 1200 2000,
-                Available Saturday 1200 2000
-              ],
-            pPairWith = [],
-            pDoNotPairWith = [],
-            pPrefereredMinGroupSize = Nothing,
-            pPrefereredMaxGroupSize = Nothing,
-            pFixed = Nothing
-          }
-      ]
+  (path : _) <- getArgs
+  -- putStrLn "=== pairings pPairWith participants ==="
+  -- pPrint $ pairings pPairWith participants
+  -- putStrLn "=== pairings pDoNotPairWith participants ==="
+  -- pPrint $ pairings pDoNotPairWith participants
+  scheduleGroups 2 40 =<< readParticipants path

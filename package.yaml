@@ -13,13 +13,14 @@ description:
 dependencies:
   - base         >= 4.6
   - bytestring
-  - sbv
   - cassava
   - containers
   - pretty-show
   - reflection
   - regex-posix
+  - sbv
   - time
+  - vector
 
 executables:
   c2g-schedule:

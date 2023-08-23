@@ -35,4 +35,5 @@ executable c2g-schedule
     , regex-posix
     , sbv
     , time
+    , vector
   default-language: Haskell2010
