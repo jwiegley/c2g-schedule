@@ -10,8 +10,6 @@
 
 module Main where
 
--- import Data.Csv
-
 import Control.Arrow (second)
 import Control.Exception (assert)
 import Data.ByteString.Lazy (ByteString)
@@ -19,7 +17,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Char (isDigit, toLower)
 import Data.Csv (FromNamedRecord, decodeByName)
 import Data.Foldable
-import Data.List (genericLength, intercalate, nub, tails)
+import Data.List (genericLength, intercalate, nub, sortOn, tails)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Proxy
@@ -36,20 +34,19 @@ type Time = Word16
 
 type Size = Word8
 
-data Group = Group
-  { gName :: String,
-    gDayOfWeek :: DayOfWeek,
-    gStartTime :: Time
-  }
-  deriving (Show, Ord, Eq)
-
-type Rank = Word8
-
 data Available = Available
   { availDayOfWeek :: DayOfWeek,
     availStartTime :: Time
   }
-  deriving (Show, Eq)
+  deriving (Show, Ord, Eq)
+
+data Group = Group
+  { gName :: String,
+    gAvail :: Available
+  }
+  deriving (Show, Ord, Eq)
+
+type Rank = Word8
 
 data RawParticipant = RawParticipant
   { firstName :: String,
@@ -134,8 +131,7 @@ determineGroups ps =
                   Map.fromList
                     [ ( Group
                           { gName = show dow ++ " " ++ show time,
-                            gDayOfWeek = dow,
-                            gStartTime = time
+                            gAvail = a
                           },
                         [p]
                       )
@@ -213,6 +209,7 @@ isValid minGroupSize maxGroupSize g p s =
                       .&& participants gi .>= fromIntegral minGroupSize
                       .&& participants gi .<= fromIntegral maxGroupSize
                       .&& facilitators gi .> 0
+                      -- jww (2023-08-23): TODO
                       -- .&& blackFacilitators gi .> 0
                   )
         )
@@ -229,16 +226,13 @@ isValid minGroupSize maxGroupSize g p s =
         )
         (pairings pDoNotPairWith p)
   where
-    -- TODO: Ensure total facilitator skill level is above a threshold
-    -- TODO: Ensure there are not too many facilitator assistants
-    -- TODO: Facilitators and assistants can be in multiple sessions
+    -- jww (2023-08-23): TODO:
+    -- - Ensure total facilitator skill level is above a threshold
+    -- - Ensure there are not too many facilitator assistants
+    -- - Facilitators and assistants can be in multiple sessions
 
     eachParticipant Participant {..} x Group {..} gi =
-      fromBool
-        ( gDayOfWeek
-            `elem` map availDayOfWeek pAvailability
-            && any (\a -> gStartTime == availStartTime a) pAvailability
-        )
+      fromBool (gAvail `elem` pAvailability)
         .&& maybe
           minBound
           fromIntegral
@@ -304,9 +298,14 @@ showSchedule g p s =
 scheduleGroups :: Size -> Size -> [Participant] -> IO ()
 scheduleGroups minGroupSize maxGroupSize p = do
   let g = determineGroups p
-  putStrLn "Finding scheduling solution...\n"
-  pPrint g
-  -- pPrint p
+  putStrLn "Finding scheduling solution..."
+  putStrLn $ show (length p) ++ " participants"
+  putStrLn $ show minGroupSize ++ " is the minimum group size"
+  putStrLn $ show maxGroupSize ++ " is the maximum group size"
+  putStrLn $ show (length g) ++ " groups selected by facilitators"
+  putStrLn $ show (length g) ++ " eligible groups after initial filtering:"
+  forM_ (sortOn (gAvail . fst) g) $ \(grp, ps) -> do
+    putStrLn $ "  " ++ gName grp ++ " (" ++ show (length ps) ++ ")"
   reify (length g, length p) $ \(Proxy :: Proxy s) -> do
     LexicographicResult res <- optimize Lexicographic $ do
       solAssignments <- mkFreeVars (length p)
@@ -343,9 +342,6 @@ readParticipants :: FilePath -> IO [Participant]
 readParticipants path = do
   csv <- BL.readFile path
   let rawParticipants = readRawParticipants csv
-  -- putStrLn "=== raw ==="
-  -- pPrint rawParticipants
-  -- putStrLn "=== cooked ==="
   return $ map cookParticipant rawParticipants
   where
     readRawParticipants :: ByteString -> [RawParticipant]
@@ -361,8 +357,10 @@ cookParticipant raw@RawParticipant {..} = Participant {..}
     pIsBlack = worldExperience /= ""
     pAvailability = fromSlot slotOne ++ fromSlot slotTwo ++ fromSlot slotThree
     pPairWith = []
+    -- jww (2023-08-23): TODO
     -- pPairWith = [map toLower affinity | affinity /= ""]
     pDoNotPairWith = []
+    -- jww (2023-08-23): TODO
     -- pDoNotPairWith = [map toLower aversion | aversion /= ""]
     pPrefereredMinGroupSize = Nothing
     pPrefereredMaxGroupSize = Nothing
