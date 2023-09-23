@@ -12,12 +12,13 @@ module Main where
 
 import Control.Arrow (second)
 import Control.Exception (assert)
+import Control.Monad (unless)
 import Data.ByteString.Lazy (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Char (isDigit, toLower)
 import Data.Csv (FromNamedRecord, decodeByName)
 import Data.Foldable
-import Data.List (genericLength, intercalate, nub, sortOn, tails)
+import Data.List (delete, genericLength, intercalate, nub, sortOn, tails)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Proxy
@@ -25,8 +26,10 @@ import Data.Reflection
 import Data.SBV
 import Data.Time
 import Data.Vector qualified as V
+import Debug.Trace
 import GHC.Generics
 import System.Environment (getArgs)
+import Text.Read (readEither)
 import Text.Show.Pretty (pPrint)
 import Prelude hiding (pi)
 
@@ -55,9 +58,13 @@ data RawParticipant = RawParticipant
     slotOne :: String,
     slotTwo :: String,
     slotThree :: String,
+    slotFour :: String,
+    slotFive :: String,
+    slotSix :: String,
     affinity :: String,
     aversion :: String,
-    facilitator :: String
+    facilitator :: String,
+    attending :: String
   }
   deriving (Show, Eq, Generic)
 
@@ -65,14 +72,13 @@ instance FromNamedRecord RawParticipant
 
 data Participant = Participant
   { pName :: String,
-    pIsFacilitator :: Bool,
+    pFacilitatorLevel :: Int,
     pIsBlack :: Bool,
     pAvailability :: [Available],
     pPairWith :: [String],
     pDoNotPairWith :: [String],
-    pPrefereredMinGroupSize :: Maybe Size,
-    pPrefereredMaxGroupSize :: Maybe Size,
-    pFixed :: Maybe Int
+    pPreferredMinGroupSize :: Maybe Size,
+    pPreferredMaxGroupSize :: Maybe Size
   }
   deriving (Show, Eq)
 
@@ -81,6 +87,7 @@ data Solution s v = Solution
   { solAssignments :: [v], -- participants -> group number
     solBlackFacilitators :: [v], -- groups -> black facilitator count
     solFacilitators :: [v], -- groups -> total facilitator count
+    solNonFacilitators :: [v], -- groups -> total non-facilitator count
     solBlackParticipants :: [v], -- groups -> black participant count
     solParticipants :: [v] -- groups -> participant count
   }
@@ -102,40 +109,53 @@ instance
           (take glen (drop plen a))
           (take glen (drop (glen + plen) a))
           (take glen (drop (glen + glen + plen) a))
-          (take glen (drop (glen + glen + glen + plen) a)),
+          (take glen (drop (glen + glen + glen + plen) a))
+          (take glen (drop (glen + glen + glen + glen + plen) a)),
         bs
       )
 
 -- Create a group for every time slot where there's an available facilitator.
 -- The schedule will not assign anyone to groups that fail to meet the
 -- necessary criteria.
-determineGroups :: [Participant] -> [(Group, [Participant])]
-determineGroups ps =
-  Map.assocs $
-    foldl'
+determineGroups :: Size -> [Participant] -> [(Group, [Participant])]
+determineGroups minGroupSize ps =
+  checkParticipants
+    $ filter
+      ( \(g, p) ->
+          length p >= fromIntegral minGroupSize
+            && length (filter (\x -> pFacilitatorLevel x >= 3) p) > 1
+      )
+    $ Map.assocs
+    $ foldl'
       (\acc p -> Map.unionWith (++) acc (f p))
       Map.empty
       ps
   where
+    checkParticipants :: [(Group, [Participant])] -> [(Group, [Participant])]
+    checkParticipants gps =
+      let avails = map (gAvail . fst) gps
+       in if all
+            ( \p ->
+                any (`elem` avails) (pAvailability p)
+                  || trace (show p ++ " does not fit") True
+            )
+            ps
+            then gps
+            else []
+
     f :: Participant -> Map Group [Participant]
-    f p =
-      availability (pIsFacilitator p) (pAvailability p)
-      where
-        availability ::
-          Bool -> [Available] -> Map Group [Participant]
-        availability isFacilitator avails =
-          (\f -> foldl' f Map.empty avails) $ \acc a ->
-            let dow = availDayOfWeek a
-                time = availStartTime a
-             in Map.unionWith (++) acc $
-                  Map.fromList
-                    [ ( Group
-                          { gName = show dow ++ " " ++ show time,
-                            gAvail = a
-                          },
-                        [p]
-                      )
-                    ]
+    f p = (\f -> foldl' f Map.empty (pAvailability p)) $ \acc a ->
+      let dow = availDayOfWeek a
+          time = availStartTime a
+       in Map.unionWith (++) acc $
+            Map.fromList
+              [ ( Group
+                    { gName = show dow ++ " " ++ show time,
+                      gAvail = a
+                    },
+                  [p]
+                )
+              ]
 
 -- Given a list of participants, determine the list of "pair ups" -- either
 -- participants with each other, or with a stated group.
@@ -175,6 +195,7 @@ isValid minGroupSize maxGroupSize g p s =
     ( length (solAssignments s) == length p
         && length (solBlackFacilitators s) == length g
         && length (solFacilitators s) == length g
+        && length (solNonFacilitators s) == length g
         && length (solParticipants s) == length g
     )
     $
@@ -195,6 +216,8 @@ isValid minGroupSize maxGroupSize g p s =
       )
       -- Track how many facilitators are in each group
       .&& ala sAnd solFacilitators (\gi x -> x .== facilitators gi)
+      -- Track how many non-facilitators are in each group
+      .&& ala sAnd solNonFacilitators (\gi x -> x .== nonFacilitators gi)
       -- Track how many black facilitators are in each group
       .&& ala sAnd solBlackFacilitators (\gi x -> x .== blackFacilitators gi)
       -- Track how many participants are in each group
@@ -204,11 +227,12 @@ isValid minGroupSize maxGroupSize g p s =
       -- Ensure correct group sizes
       .&& sAll
         ( \gi ->
-            (participants gi .== 0 .&& facilitators gi .== 0)
-              .|| ( participants gi .> 0
-                      .&& participants gi .>= fromIntegral minGroupSize
+            participants gi .== 0
+              .|| ( participants gi .>= fromIntegral (max 1 minGroupSize)
                       .&& participants gi .<= fromIntegral maxGroupSize
                       .&& facilitators gi .> 0
+                      .&& facilitators gi .< 5
+                      .&& nonFacilitators gi .> 0
                       -- jww (2023-08-23): TODO
                       -- .&& blackFacilitators gi .> 0
                   )
@@ -236,22 +260,22 @@ isValid minGroupSize maxGroupSize g p s =
         .&& maybe
           minBound
           fromIntegral
-          pPrefereredMinGroupSize
+          pPreferredMinGroupSize
           .<= solParticipants s !! gi
         .&& maybe
           maxBound
           fromIntegral
-          pPrefereredMaxGroupSize
+          pPreferredMaxGroupSize
           .>= solParticipants s !! gi
-        .&& x .== maybe x fromIntegral pFixed
 
     ala k acc f = k (zipWith f [0 ..] (acc s))
 
     participants = countParticipants (const True)
     blackParticipants = countParticipants pIsBlack
-    facilitators = countParticipants pIsFacilitator
+    facilitators = countParticipants (\p -> pFacilitatorLevel p >= 3)
+    nonFacilitators = countParticipants (\p -> pFacilitatorLevel p == 0)
     blackFacilitators =
-      countParticipants (\i -> pIsFacilitator i && pIsBlack i)
+      countParticipants (\i -> pFacilitatorLevel i >= 3 && pIsBlack i)
 
     countParticipants :: (Participant -> Bool) -> Int -> SWord8
     countParticipants f gi =
@@ -259,10 +283,7 @@ isValid minGroupSize maxGroupSize g p s =
         sum
         solAssignments
         ( \pi a ->
-            oneIf
-              ( fromIntegral gi .== a
-                  .&& fromBool (f (p !! pi))
-              )
+            oneIf (fromIntegral gi .== a .&& fromBool (f (p !! pi)))
         )
 
 showSchedule :: [Group] -> [Participant] -> Solution s Word8 -> String
@@ -288,38 +309,56 @@ showSchedule g p s =
           then "*"
           else " "
       )
-        ++ ( if pIsFacilitator i
-               then "F"
-               else " "
+        ++ ( if pFacilitatorLevel i > 0
+               then "F" ++ show (pFacilitatorLevel i)
+               else "  "
            )
         ++ " "
         ++ pName i
 
 scheduleGroups :: Size -> Size -> [Participant] -> IO ()
 scheduleGroups minGroupSize maxGroupSize p = do
-  let g = determineGroups p
+  let g = determineGroups minGroupSize p
+      p' = nub (concatMap snd g)
   putStrLn "Finding scheduling solution..."
-  putStrLn $ show (length p) ++ " participants"
+  putStrLn $ show (length p') ++ " participants"
+  putStrLn $
+    show (length (filter (\x -> pFacilitatorLevel x > 0) p'))
+      ++ " facilitators"
   putStrLn $ show minGroupSize ++ " is the minimum group size"
   putStrLn $ show maxGroupSize ++ " is the maximum group size"
   putStrLn $ show (length g) ++ " groups selected by facilitators"
   putStrLn $ show (length g) ++ " eligible groups after initial filtering:"
-  forM_ (sortOn (gAvail . fst) g) $ \(grp, ps) -> do
-    putStrLn $ "  " ++ gName grp ++ " (" ++ show (length ps) ++ ")"
-  reify (length g, length p) $ \(Proxy :: Proxy s) -> do
-    LexicographicResult res <- optimize Lexicographic $ do
-      solAssignments <- mkFreeVars (length p)
-      solBlackFacilitators <- mkFreeVars (length g)
-      solFacilitators <- mkFreeVars (length g)
-      solBlackParticipants <- mkFreeVars (length g)
-      solParticipants <- mkFreeVars (length g)
-      constrain $ isValid minGroupSize maxGroupSize (map fst g) p Solution {..}
-      minimize "number-facilitators" $ foldl' smax 0 solFacilitators
-      maximize "balance-participants" $ foldl' smin 0 solBlackParticipants
-    case extractModel res :: Maybe (Solution s Word8) of
-      Nothing -> error "No model found"
-      Just model -> dispSolution (map fst g) p model
+  _ <- work g p'
+  pure ()
   where
+    -- generate g = do
+    --   b <- work g
+    --   unless b $ do
+    --     mapM_ (generate . flip delete g) g
+    work g p' = do
+      forM_ (sortOn (gAvail . fst) g) $ \(grp, ps) -> do
+        putStrLn $ "  " ++ gName grp ++ " (" ++ show (length ps) ++ ")"
+      reify (length g, length p') $ \(Proxy :: Proxy s) -> do
+        LexicographicResult res <- optimize Lexicographic $ do
+          solAssignments <- mkFreeVars (length p')
+          solBlackFacilitators <- mkFreeVars (length g)
+          solFacilitators <- mkFreeVars (length g)
+          solNonFacilitators <- mkFreeVars (length g)
+          solBlackParticipants <- mkFreeVars (length g)
+          solParticipants <- mkFreeVars (length g)
+          constrain $
+            isValid minGroupSize maxGroupSize (map fst g) p' Solution {..}
+          maximize "number-facilitators" $ foldl' smin 0 solFacilitators
+          maximize "number-non-facilitators" $ foldl' smin 0 solNonFacilitators
+          maximize "balance-participants" $ foldl' smin 0 solBlackParticipants
+        case extractModel res :: Maybe (Solution s Word8) of
+          Nothing -> do
+            putStrLn "No model found"
+            return False
+          Just model -> do
+            dispSolution (map fst g) p' model
+            return True
     dispSolution :: [Group] -> [Participant] -> Solution s Word8 -> IO ()
     dispSolution g p' model = do
       putStr $ showSchedule g p' model
@@ -332,6 +371,7 @@ scheduleGroups minGroupSize maxGroupSize p = do
             { solAssignments = map literal (solAssignments s),
               solBlackFacilitators = map literal (solBlackFacilitators s),
               solFacilitators = map literal (solFacilitators s),
+              solNonFacilitators = map literal (solNonFacilitators s),
               solBlackParticipants = map literal (solBlackParticipants s),
               solParticipants = map literal (solParticipants s)
             }
@@ -349,22 +389,38 @@ readParticipants path = do
       Left err -> error err
       Right (_, vec) -> V.toList vec
 
+facilitatorLevel :: String -> Int
+facilitatorLevel "facilitator trainee" = 1
+facilitatorLevel "new facilitator" = 2
+facilitatorLevel "C facilitator" = 3
+facilitatorLevel "C+ facilitator" = 4
+facilitatorLevel "B facilitator" = 5
+facilitatorLevel "B+ facilitator" = 6
+facilitatorLevel "A facilitator" = 7
+facilitatorLevel "A+ facilitator" = 8
+facilitatorLevel _ = 0
+
 cookParticipant :: RawParticipant -> Participant
 cookParticipant raw@RawParticipant {..} = Participant {..}
   where
     pName = firstName ++ " " ++ lastName
-    pIsFacilitator = facilitator == "yes"
+    pFacilitatorLevel = facilitatorLevel facilitator
     pIsBlack = worldExperience /= ""
-    pAvailability = fromSlot slotOne ++ fromSlot slotTwo ++ fromSlot slotThree
+    pAvailability =
+      fromSlot slotOne
+        ++ fromSlot slotTwo
+        ++ fromSlot slotThree
+        ++ fromSlot slotFour
+        ++ fromSlot slotFive
+        ++ fromSlot slotSix
     pPairWith = []
     -- jww (2023-08-23): TODO
     -- pPairWith = [map toLower affinity | affinity /= ""]
     pDoNotPairWith = []
     -- jww (2023-08-23): TODO
     -- pDoNotPairWith = [map toLower aversion | aversion /= ""]
-    pPrefereredMinGroupSize = Nothing
-    pPrefereredMaxGroupSize = Nothing
-    pFixed = Nothing
+    pPreferredMinGroupSize = Nothing
+    pPreferredMaxGroupSize = Nothing
     pPossibleGroups = []
 
     fromSlot :: String -> [Available]
@@ -379,7 +435,17 @@ cookParticipant raw@RawParticipant {..} = Participant {..}
                in if ampm == "a" && hour == "12"
                     then 0
                     else
-                      read hour * 100
+                      either
+                        ( \msg ->
+                            error $
+                              "Failed to read hour from '"
+                                ++ s
+                                ++ "': "
+                                ++ msg
+                        )
+                        id
+                        (readEither hour)
+                        * 100
                         + ( if ampm /= "a" && hour == "12"
                               then 0
                               else 1200
@@ -404,4 +470,5 @@ main = do
   -- pPrint $ pairings pPairWith participants
   -- putStrLn "=== pairings pDoNotPairWith participants ==="
   -- pPrint $ pairings pDoNotPairWith participants
-  scheduleGroups 2 40 =<< readParticipants path
+  participants <- readParticipants path
+  scheduleGroups 6 60 participants
