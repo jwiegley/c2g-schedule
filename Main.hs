@@ -18,9 +18,11 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Char (isDigit, toLower)
 import Data.Csv (FromNamedRecord, decodeByName)
 import Data.Foldable
-import Data.List (delete, genericLength, intercalate, nub, sortOn, tails)
+import Data.Function (on)
+import Data.List (delete, genericLength, groupBy, intercalate, nub, sort, sortOn, tails)
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Ord (comparing)
 import Data.Proxy
 import Data.Reflection
 import Data.SBV
@@ -72,6 +74,7 @@ instance FromNamedRecord RawParticipant
 
 data Participant = Participant
   { pName :: String,
+    pInstance :: Int,
     pFacilitatorLevel :: Int,
     pIsBlack :: Bool,
     pAvailability :: [Available],
@@ -215,17 +218,17 @@ isValid minGroupSize maxGroupSize g p s =
               [0 .. length g - 1]
       )
       -- Track how many facilitators are in each group
-      .&& ala sAnd solFacilitators (\gi x -> x .== facilitators gi)
+      .&& attrMatch solFacilitators facilitators
       -- Track how many facilitators are in each group
-      .&& ala sAnd solTotalFacilitatorLevel (\gi x -> x .== totalFacilitatorLevel gi)
+      .&& attrMatch solTotalFacilitatorLevel totalFacilitatorLevel
       -- Track how many non-facilitators are in each group
-      .&& ala sAnd solNonFacilitators (\gi x -> x .== nonFacilitators gi)
+      .&& attrMatch solNonFacilitators nonFacilitators
       -- Track how many black facilitators are in each group
-      .&& ala sAnd solBlackFacilitators (\gi x -> x .== blackFacilitators gi)
+      .&& attrMatch solBlackFacilitators blackFacilitators
       -- Track how many participants are in each group
-      .&& ala sAnd solParticipants (\gi x -> x .== participants gi)
+      .&& attrMatch solParticipants participants
       -- Track how many black participants are in each group
-      .&& ala sAnd solBlackParticipants (\gi x -> x .== blackParticipants gi)
+      .&& attrMatch solBlackParticipants blackParticipants
       -- Ensure correct group sizes
       .&& sAll
         ( \gi ->
@@ -233,9 +236,7 @@ isValid minGroupSize maxGroupSize g p s =
               .|| ( participants gi .>= fromIntegral (max 1 minGroupSize)
                       .&& participants gi .<= fromIntegral maxGroupSize
                       .&& facilitators gi .> 0
-                      .&& facilitators gi .< 5
-                      .&& nonFacilitators gi .> 0
-                      -- jww (2023-08-23): TODO
+                      .&& nonFacilitators gi .> 2
                       -- .&& blackFacilitators gi .> 0
                   )
         )
@@ -252,10 +253,9 @@ isValid minGroupSize maxGroupSize g p s =
         )
         (pairings pDoNotPairWith p)
   where
-    -- jww (2023-08-23): TODO:
-    -- - Ensure total facilitator skill level is above a threshold
-    -- - Ensure there are not too many facilitator assistants
-    -- - Facilitators and assistants can be in multiple sessions
+    attrMatch f g = ala sAnd f ((.==) . g)
+
+    ala k acc f = k (zipWith f [0 ..] (acc s))
 
     eachParticipant Participant {..} x Group {..} gi =
       fromBool (gAvail `elem` pAvailability)
@@ -270,14 +270,14 @@ isValid minGroupSize maxGroupSize g p s =
           pPreferredMaxGroupSize
           .>= solParticipants s !! gi
 
-    ala k acc f = k (zipWith f [0 ..] (acc s))
-
     participants = countParticipants (const True)
     blackParticipants = countParticipants pIsBlack
-    facilitators = countParticipants (\p -> pFacilitatorLevel p >= 3)
-    nonFacilitators = countParticipants (\p -> pFacilitatorLevel p < 3)
-    blackFacilitators =
-      countParticipants (\i -> pFacilitatorLevel i >= 3 && pIsBlack i)
+
+    isFacilitator p = pFacilitatorLevel p >= 3
+    isNonFacilitator p = pFacilitatorLevel p == 0
+    facilitators = countParticipants isFacilitator
+    nonFacilitators = countParticipants isNonFacilitator
+    blackFacilitators = countParticipants (\i -> isFacilitator i && pIsBlack i)
 
     totalFacilitatorLevel :: Int -> SWord8
     totalFacilitatorLevel gi =
@@ -300,35 +300,32 @@ isValid minGroupSize maxGroupSize g p s =
             oneIf (fromIntegral gi .== a .&& fromBool (f (p !! pi)))
         )
 
-showSchedule :: [Group] -> [Participant] -> Solution s Word8 -> String
-showSchedule g p s =
-  unlines $ intercalate [""] $ map f assigned
-  where
-    assigned = nub (solAssignments s)
-
-    f :: Word8 -> [String]
-    f gi =
-      [ gName (g !! fromIntegral gi),
-        "===================="
-      ]
-        ++ concat
+saveSchedule :: [Group] -> [Participant] -> Solution s Word8 -> IO ()
+saveSchedule g p s =
+  forM_ (nub (solAssignments s)) $ \gi -> do
+    let name = gName (g !! fromIntegral gi)
+    writeFile (name ++ ".csv") $
+      concat $
+        concat
           ( zipWith
               (\pi i -> [getName (p !! pi) | i == gi])
               [0 ..]
               (solAssignments s)
           )
-
+  where
     getName i =
       ( if pIsBlack i
-          then "*"
-          else " "
+          then "non-white"
+          else ""
       )
-        ++ ( if pFacilitatorLevel i > 0
-               then "F" ++ show (pFacilitatorLevel i)
-               else "  "
-           )
-        ++ " "
+        ++ ","
+        ++ show (pFacilitatorLevel i)
+        ++ ","
         ++ pName i
+        ++ "\n"
+
+pcount :: [Participant] -> Int
+pcount = length . groupBy ((==) `on` pName)
 
 scheduleGroups :: Size -> Size -> [Participant] -> IO ()
 scheduleGroups minGroupSize maxGroupSize p = do
@@ -336,9 +333,9 @@ scheduleGroups minGroupSize maxGroupSize p = do
       g' = map fst g
       p' = nub (concatMap snd g)
   putStrLn "Finding scheduling solution..."
-  putStrLn $ show (length p') ++ " participants"
+  putStrLn $ show (pcount p') ++ " participants"
   putStrLn $
-    show (length (filter (\x -> pFacilitatorLevel x > 0) p'))
+    show (pcount (filter (\x -> pFacilitatorLevel x > 0) p'))
       ++ " facilitators"
   putStrLn $ show minGroupSize ++ " is the minimum group size"
   putStrLn $ show maxGroupSize ++ " is the maximum group size"
@@ -346,13 +343,8 @@ scheduleGroups minGroupSize maxGroupSize p = do
   putStrLn $ show (length g') ++ " eligible groups after initial filtering:"
   forM_ (sortOn (gAvail . fst) g) $ \(grp, ps) -> do
     putStrLn $ "  " ++ gName grp ++ " (" ++ show (length ps) ++ ")"
-  _ <- work g' p'
-  pure ()
+  work g' p'
   where
-    -- generate g = do
-    --   b <- work g
-    --   unless b $ do
-    --     mapM_ (generate . flip delete g) g
     work g p = do
       reify (length g, length p) $ \(Proxy :: Proxy s) -> do
         LexicographicResult res <- optimize Lexicographic $ do
@@ -366,19 +358,15 @@ scheduleGroups minGroupSize maxGroupSize p = do
           constrain $
             isValid minGroupSize maxGroupSize g p Solution {..}
           maximize "number-facilitators" $ foldl' smin 0 solFacilitators
-          maximize "number-facilitators" $ foldl' smin 0 solTotalFacilitatorLevel
+          maximize "facilitator-level" $ foldl' smin 0 solTotalFacilitatorLevel
           maximize "number-non-facilitators" $ foldl' smin 0 solNonFacilitators
           maximize "balance-participants" $ foldl' smin 0 solBlackParticipants
         case extractModel res :: Maybe (Solution s Word8) of
-          Nothing -> do
-            putStrLn "No model found"
-            return False
-          Just model -> do
-            dispSolution g p model
-            return True
+          Nothing -> putStrLn "No model found"
+          Just model -> dispSolution g p model
     dispSolution :: [Group] -> [Participant] -> Solution s Word8 -> IO ()
     dispSolution g p' model = do
-      putStr $ showSchedule g p' model
+      saveSchedule g p' model
       putStrLn $
         "\nValid: "
           ++ show (isValid minGroupSize maxGroupSize g p' (literalize model))
@@ -400,7 +388,7 @@ readParticipants :: FilePath -> IO [Participant]
 readParticipants path = do
   csv <- BL.readFile path
   let rawParticipants = readRawParticipants csv
-  return $ map cookParticipant rawParticipants
+  return $ concatMap (expandParticipant . cookParticipant) rawParticipants
   where
     readRawParticipants :: ByteString -> [RawParticipant]
     readRawParticipants bs = case decodeByName bs of
@@ -419,10 +407,17 @@ facilitatorLevel "A+ facilitator" = 8
 facilitatorLevel "team coordinator" = 9
 facilitatorLevel _ = 0
 
+expandParticipant :: Participant -> [Participant]
+expandParticipant p = [p]
+
+-- expandParticipant p =
+--   zipWith (\i p' -> p' {pInstance = i}) [1 ..] (replicate (pCanAttend p) p)
+
 cookParticipant :: RawParticipant -> Participant
 cookParticipant raw@RawParticipant {..} = Participant {..}
   where
     pName = firstName ++ " " ++ lastName
+    pInstance = 0
     pFacilitatorLevel = facilitatorLevel facilitator
     pIsBlack = worldExperience /= ""
     pCanAttend = read attending
@@ -440,7 +435,6 @@ cookParticipant raw@RawParticipant {..} = Participant {..}
     -- pDoNotPairWith = [map toLower aversion | aversion /= ""]
     pPreferredMinGroupSize = Nothing
     pPreferredMaxGroupSize = Nothing
-    pPossibleGroups = []
 
     fromSlot :: String -> [Available]
     fromSlot "" = []
@@ -451,7 +445,7 @@ cookParticipant raw@RawParticipant {..} = Participant {..}
               let rest = drop 4 s
                   hour = takeWhile isDigit rest
                   ampm = dropWhile isDigit rest
-               in if ampm == "a" && hour == "12"
+               in if ampm == "am" && hour == "12"
                     then 0
                     else
                       either
@@ -465,7 +459,7 @@ cookParticipant raw@RawParticipant {..} = Participant {..}
                         id
                         (readEither hour)
                         * 100
-                        + ( if ampm /= "a" && hour == "12"
+                        + ( if ampm /= "am" && hour == "12"
                               then 0
                               else 1200
                           )
@@ -485,9 +479,10 @@ cookParticipant raw@RawParticipant {..} = Participant {..}
 main :: IO ()
 main = do
   (path : _) <- getArgs
-  -- putStrLn "=== pairings pPairWith participants ==="
-  -- pPrint $ pairings pPairWith participants
+  participants <- readParticipants path
+  -- pPrint participants
+  putStrLn "=== pairings pPairWith participants ==="
+  pPrint $ pairings pPairWith participants
   -- putStrLn "=== pairings pDoNotPairWith participants ==="
   -- pPrint $ pairings pDoNotPairWith participants
-  participants <- readParticipants path
-  scheduleGroups 5 60 participants
+  scheduleGroups 6 60 participants
