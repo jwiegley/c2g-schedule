@@ -21,14 +21,14 @@
           c2g-schedule =
             final.haskell-nix.project' {
               src = ./.;
-              compiler-nix-name = "ghc962";
+              compiler-nix-name = "ghc963";
               shell.tools = {
                 cabal = {};
                 haskell-language-server = {};
                 # hlint = {};
               };
               shell.buildInputs = with pkgs; [
-                pkgconfig
+                pkg-config
               ];
             };
         })
